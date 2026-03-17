@@ -35,7 +35,7 @@ export default function HelloWorld() {
 
   return (
     <div>
-      <h1>Hello World</h1>
+      <h1>Hello World WASM</h1>
       <p style={{ color: '#888' }}>
         Running <code>helloworld.py</code> via Pyodide on the main thread
       </p>

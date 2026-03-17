@@ -6,4 +6,5 @@ export type TranscriptionWorkerResponse =
   | { type: 'init-progress'; message: string }
   | { type: 'init-done' }
   | { type: 'init-error'; error: string }
+  | { type: 'ready' }
   | { type: 'result'; chunkId: number; text: string; latencyMs: number }

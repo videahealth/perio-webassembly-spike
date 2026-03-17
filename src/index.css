@@ -51,7 +51,6 @@
 }
 
 #root {
-  width: 1126px;
   max-width: 100%;
   margin: 0 auto;
   text-align: center;
@@ -104,6 +103,7 @@ code,
 
 .chunk-row > *, .chunk-row > .play-btn {
   padding: 2px 5px;
+  padding-left: 10px;
   background: none;
 }
 

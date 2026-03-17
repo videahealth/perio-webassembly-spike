@@ -8,8 +8,10 @@ export type ChunkEntry = {
   startTime: number
   duration: number
   vadLatencyMs: number
+  sttEnqueuedAt: number
   text: string | null
   sttLatencyMs: number | null
+  silence: boolean
 }
 
 export type InFlightChunk = {
@@ -21,16 +23,31 @@ export type InFlightChunk = {
   completedAt: number | null
 }
 
-export type WorkerStatus = {
+export type WorkerNodeStatus = {
   name: string
   ready: boolean
   inFlightChunks: InFlightChunk[]
 }
 
+export type PipelineStatus = {
+  vad: WorkerNodeStatus
+  queue: PendingChunk[]
+  stt: WorkerNodeStatus[]
+}
+
+export type PendingChunk = {
+  chunkId: number
+  audio: Float32Array<ArrayBuffer>
+  startTime: number
+  duration: number
+  enqueuedAt: number
+}
+
 export function useSttWorkerPipeline() {
   const vadWorkerRef = useRef<Worker | null>(null)
   const sttPoolRef = useRef<Worker[]>([])
-  const sttQueueCountRef = useRef<number[]>([])
+  const sttBusyRef = useRef<boolean[]>([])
+  const pendingQueueRef = useRef<PendingChunk[]>([])
   const chunkWorkerMapRef = useRef<Map<number, number>>(new Map())
   const audioContextRef = useRef<AudioContext | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -46,9 +63,15 @@ export function useSttWorkerPipeline() {
   const [processing, setProcessing] = useState(false)
   const [chunks, setChunks] = useState<ChunkEntry[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [workerStatuses, setWorkerStatuses] = useState<WorkerStatus[]>([])
+  const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>({
+    vad: { name: 'VAD', ready: false, inFlightChunks: [] },
+    queue: [],
+    stt: [],
+  })
 
   const fileDoneRef = useRef<(() => void) | null>(null)
+  const fileDurationRef = useRef(0)
+  const lastSegmentEndRef = useRef(0)
   const recordSampleRateRef = useRef(16000)
   const nextIdRef = useRef(0)
 
@@ -61,17 +84,19 @@ export function useSttWorkerPipeline() {
   const sttInFlightRef = useRef<InFlightChunk[][]>([])
 
   function updateWorkerStatuses() {
-    const statuses: WorkerStatus[] = [
-      { name: 'VAD', ready: vadReadyRef.current, inFlightChunks: [] },
-    ]
+    const stt: WorkerNodeStatus[] = []
     for (let i = 0; i < poolSizeRef.current; i++) {
-      statuses.push({
+      stt.push({
         name: `STT ${i + 1}`,
         ready: sttReadyRef.current[i] ?? false,
         inFlightChunks: [...(sttInFlightRef.current[i] ?? [])],
       })
     }
-    setWorkerStatuses(statuses)
+    setPipelineStatus({
+      vad: { name: 'VAD', ready: vadReadyRef.current, inFlightChunks: [] },
+      queue: [...pendingQueueRef.current],
+      stt,
+    })
   }
 
   function checkReady() {
@@ -84,28 +109,72 @@ export function useSttWorkerPipeline() {
     updateWorkerStatuses()
   }
 
-  // Send a segment to the least-loaded STT worker
-  const transcribeSegment = useCallback((chunkId: number, audio: Float32Array<ArrayBuffer>, startTime: number, duration: number) => {
-    const pool = sttPoolRef.current
-    const counts = sttQueueCountRef.current
-    if (pool.length === 0) return
-    let minIdx = 0
-    for (let i = 1; i < counts.length; i++) {
-      if (counts[i] < counts[minIdx]) minIdx = i
-    }
-    counts[minIdx]++
-    chunkWorkerMapRef.current.set(chunkId, minIdx)
-    sttInFlightRef.current[minIdx]?.push({ chunkId, startTime, duration, enqueuedAt: performance.now(), done: false, completedAt: null })
+  // Send a chunk directly to a specific worker
+  function sendToWorker(workerIdx: number, item: PendingChunk) {
+    sttBusyRef.current[workerIdx] = true
+    chunkWorkerMapRef.current.set(item.chunkId, workerIdx)
+    sttInFlightRef.current[workerIdx]?.push({
+      chunkId: item.chunkId,
+      startTime: item.startTime,
+      duration: item.duration,
+      enqueuedAt: item.enqueuedAt,
+      done: false,
+      completedAt: null,
+    })
     updateWorkerStatuses()
-    const msg: TranscriptionWorkerRequest = { type: 'transcribe', chunkId, audio, startTime, duration }
-    pool[minIdx].postMessage(msg)
+    const msg: TranscriptionWorkerRequest = {
+      type: 'transcribe',
+      chunkId: item.chunkId,
+      audio: item.audio,
+      startTime: item.startTime,
+      duration: item.duration,
+    }
+    sttPoolRef.current[workerIdx].postMessage(msg)
+  }
+
+  // Drain the queue into a specific worker that just became idle
+  function getJobFromQueue(workerIdx: number) {
+    const queue = pendingQueueRef.current
+    if (queue.length === 0) return
+    sendToWorker(workerIdx, queue.shift()!)
+  }
+
+  // Try to send directly to an idle worker; fall back to queue
+  const transcribeSegment = useCallback((chunkId: number, audio: Float32Array<ArrayBuffer>, startTime: number, duration: number) => {
+    const job: PendingChunk = { chunkId, audio, startTime, duration, enqueuedAt: performance.now() }
+    const busy = sttBusyRef.current
+    for (let i = 0; i < busy.length; i++) {
+      if (!busy[i]) {
+        sendToWorker(i, job)
+        return
+      }
+    }
+    pendingQueueRef.current.push(job)
+    updateWorkerStatuses()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Insert a silence chunk for gaps between VAD segments
+  function addSilenceChunk(startTime: number, duration: number) {
+    if (duration < 0.05) return // skip trivially small gaps
+    const id = nextIdRef.current++
+    setChunks(prev => [...prev, { id, audio: new Float32Array(0) as Float32Array<ArrayBuffer>, startTime, duration, vadLatencyMs: 0, sttEnqueuedAt: 0, text: '', sttLatencyMs: null, silence: true }])
+  }
 
   // Add a VAD chunk and kick off transcription
   const addVadSegment = useCallback((audio: Float32Array<ArrayBuffer>, startTime: number, duration: number, vadLatencyMs: number) => {
+    // Fill gap since last segment
+    const gap = startTime - lastSegmentEndRef.current
+    if (gap > 0) {
+      addSilenceChunk(lastSegmentEndRef.current, gap)
+    }
+    lastSegmentEndRef.current = startTime + duration
+
     const id = nextIdRef.current++
-    setChunks(prev => [...prev, { id, audio, startTime, duration, vadLatencyMs, text: null, sttLatencyMs: null }])
+    const sttEnqueuedAt = performance.now()
+    setChunks(prev => [...prev, { id, audio, startTime, duration, vadLatencyMs, sttEnqueuedAt, text: null, sttLatencyMs: null, silence: false }])
     transcribeSegment(id, audio, startTime, duration)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transcribeSegment])
 
   // Teardown all workers
@@ -114,14 +183,15 @@ export function useSttWorkerPipeline() {
     vadWorkerRef.current = null
     sttPoolRef.current.forEach(w => w.terminate())
     sttPoolRef.current = []
-    sttQueueCountRef.current = []
+    sttBusyRef.current = []
+    pendingQueueRef.current = []
     sttInFlightRef.current = []
     sttReadyRef.current = []
     chunkWorkerMapRef.current.clear()
     vadReadyRef.current = false
     poolSizeRef.current = 0
     setReady(false)
-    setWorkerStatuses([])
+    setPipelineStatus({ vad: { name: 'VAD', ready: false, inFlightChunks: [] }, queue: [], stt: [] })
   }, [])
 
   // Create and init all workers
@@ -163,12 +233,18 @@ export function useSttWorkerPipeline() {
         case 'vad-segment':
           addVadSegment(msg.audio, msg.startTime, msg.duration, msg.vadEmittedAt - msg.audioReceivedAt)
           break
-        case 'file-done':
+        case 'file-done': {
+          // Trailing silence after last VAD segment
+          const trailingGap = fileDurationRef.current - lastSegmentEndRef.current
+          if (trailingGap > 0) {
+            addSilenceChunk(lastSegmentEndRef.current, trailingGap)
+          }
           setTimeout(() => {
             setProcessing(false)
             fileDoneRef.current?.()
             fileDoneRef.current = null
           }, 500)
+        }
           break
         case 'error':
           setError(msg.error)
@@ -180,7 +256,8 @@ export function useSttWorkerPipeline() {
     // Create STT worker pool
     sttReadyRef.current = new Array(poolSize).fill(false)
     sttInFlightRef.current = Array.from({ length: poolSize }, () => [] as InFlightChunk[])
-    sttQueueCountRef.current = new Array(poolSize).fill(0)
+    sttBusyRef.current = new Array(poolSize).fill(false)
+    pendingQueueRef.current = []
     updateWorkerStatuses()
 
     const sttWorkers: Worker[] = []
@@ -207,7 +284,6 @@ export function useSttWorkerPipeline() {
           case 'result': {
             const workerIdx = chunkWorkerMapRef.current.get(msg.chunkId)
             if (workerIdx !== undefined) {
-              sttQueueCountRef.current[workerIdx]--
               const arr = sttInFlightRef.current[workerIdx]
               if (arr) {
                 const entry = arr.find(c => c.chunkId === msg.chunkId)
@@ -221,6 +297,10 @@ export function useSttWorkerPipeline() {
             updateWorkerStatuses()
             break
           }
+          case 'ready':
+            sttBusyRef.current[i] = false
+            getJobFromQueue(i)
+            break
         }
       }
 
@@ -247,14 +327,28 @@ export function useSttWorkerPipeline() {
   }, [])
 
   // Flush VAD state (emits any remaining segment) and signal stop
-  const flushVad = useCallback(() => {
+  // If totalDuration is provided, trailing silence will be added after flush completes
+  const flushVad = useCallback((totalDuration?: number) => {
     vadWorkerRef.current?.postMessage({ type: 'stop' } satisfies VadWorkerRequest)
+    if (totalDuration !== undefined) {
+      // Delay to let flushed vad-segment messages arrive first
+      setTimeout(() => {
+        const trailingGap = totalDuration - lastSegmentEndRef.current
+        if (trailingGap > 0) {
+          addSilenceChunk(lastSegmentEndRef.current, trailingGap)
+        }
+      }, 200)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const resetState = useCallback(() => {
     setChunks([])
     nextIdRef.current = 0
-    sttQueueCountRef.current.fill(0)
+    lastSegmentEndRef.current = 0
+    fileDurationRef.current = 0
+    pendingQueueRef.current = []
+    sttBusyRef.current.fill(false)
     sttInFlightRef.current.forEach(a => a.length = 0)
     chunkWorkerMapRef.current.clear()
     setError(null)
@@ -328,6 +422,7 @@ export function useSttWorkerPipeline() {
 
     resetState()
     setProcessing(true)
+    fileDurationRef.current = samples.length / 16000
 
     return new Promise<void>((resolve) => {
       fileDoneRef.current = resolve
@@ -346,7 +441,7 @@ export function useSttWorkerPipeline() {
     processing,
     chunks,
     error,
-    workerStatuses,
+    pipelineStatus,
     init,
     start,
     stop,

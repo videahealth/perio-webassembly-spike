@@ -1,11 +1,11 @@
 import { useContinuousWorker } from '../useContinuousWorker'
 
-export default function ContinuousStreamingWorker() {
+export default function ContinuousWorker() {
   const { ready, running, log, error, start, send, stop } = useContinuousWorker()
 
   return (
     <div>
-      <h1>Continuous Streaming Worker</h1>
+      <h1>Continuous Worker</h1>
       <p style={{ color: '#888' }}>
         Long-lived Python process with bidirectional ping/pong messaging
       </p>

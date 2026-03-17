@@ -64,6 +64,7 @@ self.onmessage = async (event: MessageEvent<TranscriptionWorkerRequest>) => {
       nextRecognizer = createRecognizer()
       post({ type: 'init-progress', message: 'Vosk model loaded' })
       post({ type: 'init-done' })
+      post({ type: 'ready' })
     } catch (e) {
       post({ type: 'init-error', error: `Vosk model failed: ${e instanceof Error ? e.message : String(e)}` })
     }
@@ -91,6 +92,7 @@ self.onmessage = async (event: MessageEvent<TranscriptionWorkerRequest>) => {
       performance.measure(label, markStart)
       post({ type: 'result', chunkId, text, latencyMs: Date.now() - submitTime })
       recognizer.remove()
+      post({ type: 'ready' })
     })
 
     recognizer.acceptWaveformFloat(audio, 16000)

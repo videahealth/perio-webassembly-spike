@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { loadPyodide, type PyodideInterface } from 'pyodide'
-import { useSttWorkerPipeline, type ChunkEntry, type WorkerStatus, type InFlightChunk } from '../useSttWorkerPipeline'
+import { useSttPipeline } from '../SttWorkerPipelineContext'
+import type { ChunkEntry, WorkerNodeStatus, PendingChunk } from '../useSttWorkerPipeline'
 
 type DisplayEntry = ChunkEntry & {
   commands: unknown[] | null
@@ -44,10 +45,10 @@ function fmtTimeRange(startTime: number, duration: number): string {
 }
 
 function fmtElapsed(enqueuedAt: number, now: number): string {
-  return `[${((now - enqueuedAt) / 1000).toFixed(1)}s]`
+  return `${((now - enqueuedAt) / 1000).toFixed(1)}s`
 }
 
-function WorkerBox({ status, now }: { status: WorkerStatus; now: number }) {
+function WorkerBox({ status }: { status: WorkerNodeStatus }) {
   const hasPending = status.inFlightChunks.some(c => !c.done)
   return (
     <div style={{
@@ -70,32 +71,59 @@ function WorkerBox({ status, now }: { status: WorkerStatus; now: number }) {
         {hasPending && <span>{'\u{1F504}'}</span>}
       </div>
       {status.inFlightChunks.length > 0 ? (
-        <div style={{ fontSize: '0.75rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '0 6px', fontSize: '0.75rem', alignItems: 'center' }}>
           {status.inFlightChunks.map((chunk, i) => {
             const firstPending = status.inFlightChunks.findIndex(c => !c.done)
             const isProcessing = !chunk.done && i === firstPending
             const icon = chunk.done ? '\u{2705}' : isProcessing ? '\u{1F504}' : '\u{23F3}'
             const color = chunk.done ? '#4caf50' : isProcessing ? '#ffb74d' : '#888'
-            const elapsed = chunk.done
-              ? fmtElapsed(chunk.enqueuedAt, chunk.completedAt!)
-              : fmtElapsed(chunk.enqueuedAt, now)
             return (
-              <div key={chunk.chunkId} style={{ color, padding: '1px 0' }}>
-                {icon}{' '}
-                {fmtTimeRange(chunk.startTime, chunk.duration)}{' '}
-                <span style={{ color: '#666' }}>{elapsed}</span>
+              <div key={chunk.chunkId} style={{ display: 'contents', color }}>
+                <span>{icon}</span>
+                <span>{fmtTimeRange(chunk.startTime, chunk.duration)}</span>
               </div>
             )
           })}
         </div>
       ) : (
-        <div style={{ color: '#555', fontSize: '0.75rem' }}>idle</div>
+        <div style={{ color: '#555', fontSize: '0.75rem' }}>{status.ready ? 'idle' : 'loading...'}</div>
       )}
     </div>
   )
 }
 
-export default function RealSttWorker() {
+function QueueBox({ jobs }: { jobs: PendingChunk[] }) {
+  return (
+    <div style={{
+      border: '1px solid #333',
+      borderRadius: '6px',
+      padding: '8px 12px',
+      minWidth: '120px',
+      background: '#1a1a1a',
+      fontSize: '0.8rem',
+      fontFamily: 'monospace',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+        <strong style={{ color: '#ddd' }}>Queue</strong>
+        {jobs.length > 0 && <span style={{ color: '#888' }}>({jobs.length})</span>}
+      </div>
+      {jobs.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '0 6px', fontSize: '0.75rem', alignItems: 'center' }}>
+          {jobs.map(job => (
+            <div key={job.chunkId} style={{ display: 'contents', color: '#888' }}>
+              <span>{'\u23F3'}</span>
+              <span>{fmtTimeRange(job.startTime, job.duration)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ color: '#555', fontSize: '0.75rem' }}>empty</div>
+      )}
+    </div>
+  )
+}
+
+export default function SttWorker() {
   const {
     ready,
     initializing,
@@ -105,7 +133,7 @@ export default function RealSttWorker() {
     processing,
     chunks,
     error,
-    workerStatuses,
+    pipelineStatus,
     init,
     start,
     stop,
@@ -113,7 +141,7 @@ export default function RealSttWorker() {
     feedAudio,
     flushVad,
     resetState,
-  } = useSttWorkerPipeline()
+  } = useSttPipeline()
 
   const [selectedModel, setSelectedModel] = useState(VOSK_MODELS[0].url)
   const [poolSize, setPoolSize] = useState(4)
@@ -132,11 +160,12 @@ export default function RealSttWorker() {
 
   // Tick timer for elapsed time display in worker boxes
   useEffect(() => {
-    const hasPending = workerStatuses.some(s => s.inFlightChunks.length > 0)
-    if (!hasPending) return
+    const hasPendingWorkers = pipelineStatus.stt.some(s => s.inFlightChunks.length > 0) || pipelineStatus.queue.length > 0
+    const hasPendingStt = chunks.some(c => c.text === null && !c.silence)
+    if (!hasPendingWorkers && !hasPendingStt) return
     const id = setInterval(() => setNow(performance.now()), 100)
     return () => clearInterval(id)
-  }, [workerStatuses])
+  }, [pipelineStatus, chunks])
 
   async function ensurePyodide() {
     if (pyodideRef.current) return
@@ -198,7 +227,7 @@ export default function RealSttWorker() {
         })
       )
     })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Track audio playback time for highlighting
@@ -243,7 +272,7 @@ export default function RealSttWorker() {
         offset = end
         if (offset < fileSamples.length) await new Promise(r => setTimeout(r, chunkDurationMs))
       }
-      flushVad()
+      flushVad(fileSamples.length / 16000)
       setSimulating(false)
       simulatingRef.current = false
     }
@@ -278,16 +307,34 @@ export default function RealSttWorker() {
     return `${m}:${s.toString().padStart(2, '0')}`
   }
 
-  const allCommands = displayEntries.flatMap(e => e.commands ?? [])
-  const activeChunkIndex = displayEntries.findIndex(
-    e => currentTime >= e.startTime && currentTime < e.startTime + e.duration
-  )
+  const filteredEntries = displayEntries.filter(e => !e.silence || e.duration >= 1)
+  const lastEntry = filteredEntries[filteredEntries.length - 1]
+  const trailingStartTime = lastEntry ? lastEntry.startTime + lastEntry.duration : 0
+  const showTrailing = simulating && !lastEntry?.silence;
+  const trailingSilence: DisplayEntry | null = showTrailing ? {
+    id: -1,
+    audio: new Float32Array(0) as Float32Array<ArrayBuffer>,
+    startTime: trailingStartTime,
+    duration: Infinity,
+    vadLatencyMs: 0,
+    sttEnqueuedAt: 0,
+    text: '',
+    sttLatencyMs: null,
+    silence: true,
+    commands: null,
+    chunkUrl: null,
+  } : null
+  const renderedEntries = trailingSilence ? [...filteredEntries, trailingSilence] : filteredEntries
+
+  const activeChunkId = simulating
+    ? renderedEntries[renderedEntries.length - 1]?.id ?? -1
+    : renderedEntries.find(e => currentTime >= e.startTime && currentTime < e.startTime + e.duration)?.id ?? -1
   const canProcess = ready && fileSamples && !processing && !simulating && !listening
   const isBusy = processing || simulating || listening
 
   return (
     <div>
-      <h1>Real STT Worker</h1>
+      <h1>STT Worker</h1>
       <p style={{ color: '#888' }}>
         Sherpa ONNX + Silero VAD + Vosk, running entirely in WASM + Web Workers
       </p>
@@ -298,7 +345,7 @@ export default function RealSttWorker() {
       {/* Control Panel */}
       <div style={{
         marginTop: '1rem', background: '#1a1a1a', borderRadius: '8px', padding: '1rem',
-        display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.75rem 1rem', alignItems: 'center',
+        display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '0.75rem 1rem', alignItems: 'center', border: '1px solid #444'
       }}>
         {/* Workers row */}
         <span style={{ color: '#888', fontSize: '0.85rem', fontWeight: 'bold', alignSelf: 'end', marginBottom: '8px' }}>Workers</span>
@@ -334,7 +381,7 @@ export default function RealSttWorker() {
             disabled={isBusy || initializing}
             style={btnPrimary}
           >
-            {initializing ? 'Initializing...' : ready ? 'Re-initialize' : 'Initialize'}
+            {initializing ? 'Loading...' : ready ? 'Reload Models' : 'Load Models'}
           </button>
         </div>
 
@@ -405,17 +452,23 @@ export default function RealSttWorker() {
         <audio ref={audioRef} controls src={audioUrl} style={{ width: '100%', marginTop: '1rem' }} />
       )}
 
-      {/* Worker status boxes */}
-      {workerStatuses.length > 0 && (
-        <section style={{ marginTop: '1rem', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          {workerStatuses.map(s => (
-            <WorkerBox key={s.name} status={s} now={now} />
-          ))}
+      {/* Worker status boxes: VAD → Queue → STT */}
+      {pipelineStatus.stt.length > 0 && (
+        <section style={{ marginTop: '1rem', display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+          <WorkerBox status={pipelineStatus.vad} />
+          <span style={{ color: '#555', fontSize: '1.2rem', marginTop: '8px' }}>{'\u2192'}</span>
+          <QueueBox jobs={pipelineStatus.queue} />
+          <span style={{ color: '#555', fontSize: '1.2rem', marginTop: '8px' }}>{'\u2192'}</span>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {pipelineStatus.stt.map(s => (
+              <WorkerBox key={s.name} status={s} />
+            ))}
+          </div>
         </section>
       )}
 
       {/* Transcription results */}
-      {displayEntries.length > 0 && (
+      {renderedEntries.length > 0 && (
         <section style={{ marginTop: '1.5rem', textAlign: 'left' }}>
           <h2 style={{ textAlign: 'left' }}>Transcription Results</h2>
           <div style={{
@@ -423,59 +476,71 @@ export default function RealSttWorker() {
             background: '#1a1a1a', borderRadius: '8px',
             maxHeight: '500px', overflow: 'auto', textAlign: 'left',
             paddingTop: '1rem', paddingBottom: '1rem',
-            display: 'grid', gridTemplateColumns: 'min-content min-content min-content min-content min-content max-content 1fr'
+            display: 'grid', gridTemplateColumns: 'min-content min-content min-content min-content min-content max-content 1fr',
+            border: '1px solid #444'
           }}>
-            <div style={{ display: 'contents', fontWeight: 'bold', color: '#aaa' }}>
-              <span style={{ paddingLeft: '1rem' }}>Actions</span>
-              <span></span>
-              <span>VAD</span>
-              <span>STT</span>
-              <span>Time</span>
-              <span>Transcript</span>
-              <span>Commands</span>
+            <div style={{ display: 'contents', fontWeight: 'bold', color: '#aaa' }} className='chunk-row'>
+              <span style={{ paddingLeft: '1rem', gridColumn: '1 / span 2', textDecoration: 'underline' }}>Actions</span>
+              <span style={{ textDecoration: 'underline' }}>VAD</span>
+              <span style={{ textDecoration: 'underline' }}>STT</span>
+              <span style={{ textDecoration: 'underline' }}>Time</span>
+              <span style={{paddingLeft: '20px', textDecoration: 'underline'}}>Transcript</span>
+              <span style={{ textDecoration: 'underline' }}>Commands</span>
             </div>
-            {displayEntries.map((entry, i) => (
-              <div key={entry.id} className={`chunk-row${i === activeChunkIndex ? ' chunk-active' : ''}`} style={{ display: 'contents' }}>
-                <button
-                  className='play-btn'
-                  onClick={() => playChunk(entry.chunkUrl)}
-                  style={{ paddingLeft: '1rem', border: 'none', cursor: 'pointer', fontSize: '0.85rem', flexShrink: 0 }}
-                  title="Play this VAD chunk"
-                >
-                  &#9654;
-                </button>
-                {entry.chunkUrl && (
-                  <a
-                    href={entry.chunkUrl}
-                    download={`chunk-${formatTime(entry.startTime).replace(':', 'm')}s.wav`}
-                    style={{ color: '#888', textDecoration: 'none', flexShrink: 0, fontSize: '0.75rem' }}
-                    title="Download WAV"
+            {renderedEntries.map((entry) => (
+              <div key={entry.id} className={`chunk-row${entry.id === activeChunkId ? ' chunk-active' : ''}`} style={{ display: 'contents' }}>
+                {entry.id !== -1 ? (<>
+                  <button
+                    className='play-btn'
+                    onClick={() => playChunk(entry.chunkUrl)}
+                    style={{ paddingLeft: '1rem', paddingRight: 0, border: 'none', display: 'flex', cursor: 'pointer', width: '100%', fontSize: '0.85rem' }}
+                    title="Play this VAD chunk"
                   >
-                    &#11015;
-                  </a>
-                )}
+                    &#9654;
+                  </button>
+                  {entry.chunkUrl && (
+                    <button
+                      style={{ paddingLeft: '0px', border: 'none', display: 'flex', cursor: 'pointer', width: '100%',  fontSize: '0.85rem' }}
+                    >
+                      <a
+                        href={entry.chunkUrl}
+                        download={`chunk-${formatTime(entry.startTime).replace(':', 'm')}s.wav`}
+                        style={{ color: '#888', textDecoration: 'none', fontSize: '0.75rem', alignSelf: 'start' }}
+                        title="Download WAV"
+                      >
+                        &#11015;
+                      </a>
+                    </button>
+                  )}
+                </>) : (<>
+                  <span /><span />
+                </>)}
                 <span style={{ color: '#aaa', whiteSpace: 'nowrap' }}>
                   {entry.vadLatencyMs}ms
                 </span>
-                <span style={{ color: '#aaa', whiteSpace: 'nowrap' }}>
-                  {entry.sttLatencyMs !== null ? `${entry.sttLatencyMs}ms` : '...'}
+                <span style={{ color: entry.sttLatencyMs !== null ? '#4caf50' : entry.silence ? '#666' : '#ffb74d', whiteSpace: 'nowrap' }}>
+                  {entry.sttLatencyMs !== null
+                    ? `${(entry.sttLatencyMs / 1000).toFixed(1)}s`
+                    : entry.silence
+                      ? '\u2014'
+                      : fmtElapsed(entry.sttEnqueuedAt, now)}
                 </span>
                 <a
                   href="#"
                   onClick={(e) => { e.preventDefault(); seekTo(entry.startTime) }}
                   className="timestamp-link"
-                  style={{ color: '#4fc3f7', whiteSpace: 'nowrap', flexShrink: 0 }}
+                  style={{ color: entry.text !== null || entry.silence ? '#4caf50' : '#ffb74d', whiteSpace: 'nowrap', flexShrink: 0 }}
                   title={`Jump to ${formatTime(entry.startTime)}`}
                 >
-                  {formatTime(entry.startTime)} – {formatTime(entry.startTime + entry.duration)}
+                  {formatTime(entry.startTime)}{entry.duration !== Infinity ? `–${formatTime(entry.startTime + entry.duration)}` : '–...'}
                 </a>
-                <span style={{ color: entry.text !== null ? '#81c784' : '#666', padding: '0 50px 0 20px' }}>
-                  {entry.text !== null ? entry.text : '...'}
+                <span style={{ color: entry.silence ? '#555' : entry.text !== null ? (entry.text === '' ? '#666' : '#ddd') : '#888', padding: '0 50px 0 20px' }}>
+                  {entry.silence ? 'voice not detected' : entry.text === null ? '\u{1F504}' : entry.text === '' ? '\u2014' : entry.text}
                 </span>
                 {entry.commands === null ? (
-                  <span style={{ color: '#666', flexShrink: 0 }}>...</span>
+                  <span style={{ color: '#888', flexShrink: 0 }}>{entry.silence ? '\u2014' : '\u{1F504}'}</span>
                 ) : entry.commands.length > 0 ? (
-                  <span style={{ color: '#ffb74d', flex: 1, flexShrink: 0 }}>
+                  <span style={{ color: '#ddd', flex: 1, flexShrink: 0 }}>
                     {entry.commands.map(c => JSON.stringify(c)).join(', ')}
                   </span>
                 ) : (
