@@ -149,6 +149,7 @@ export default function SttWorker() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [fileSamples, setFileSamples] = useState<Float32Array | null>(null)
   const [processMode, setProcessMode] = useState<ProcessMode>('immediate')
+  const [skipVad, setSkipVad] = useState(false)
   const [simulating, setSimulating] = useState(false)
   const simulatingRef = useRef(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -258,7 +259,7 @@ export default function SttWorker() {
     resetState()
     setDisplayEntries([])
     if (processMode === 'immediate') {
-      await processFile(new Float32Array(fileSamples))
+      await processFile(new Float32Array(fileSamples) as Float32Array<ArrayBuffer>, skipVad)
     } else {
       setSimulating(true)
       simulatingRef.current = true
@@ -416,6 +417,18 @@ export default function SttWorker() {
               >
                 <option value="immediate">Immediate</option>
                 <option value="simulated">Simulated</option>
+              </select>
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', alignItems: 'start', gap: '2px', fontSize: '0.75rem', color: '#888' }}>
+              Skip VAD
+              <select
+                value={skipVad ? 'true' : 'false'}
+                onChange={e => setSkipVad(e.target.value === 'true')}
+                disabled={processing || simulating || processMode !== 'immediate'}
+                style={{ padding: '8px', fontSize: '1rem' }}
+              >
+                <option value="false">No</option>
+                <option value="true">Yes</option>
               </select>
             </label>
 

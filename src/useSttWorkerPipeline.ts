@@ -415,12 +415,26 @@ export function useSttWorkerPipeline() {
     setSpeaking(false)
   }, [])
 
-  const processFile = useCallback((samples: Float32Array): Promise<void> => {
-    if (!vadWorkerRef.current || !ready) {
+  const processFile = useCallback((samples: Float32Array<ArrayBuffer>, skipVad?: boolean): Promise<void> => {
+    if (!ready) {
       return Promise.reject(new Error('Worker not ready'))
     }
 
     resetState()
+
+    if (skipVad) {
+      const duration = samples.length / 16000
+      const id = nextIdRef.current++
+      const sttEnqueuedAt = performance.now()
+      setChunks([{ id, audio: samples, startTime: 0, duration, vadLatencyMs: 0, sttEnqueuedAt, text: null, sttLatencyMs: null, silence: false }])
+      transcribeSegment(id, samples, 0, duration)
+      return Promise.resolve()
+    }
+
+    if (!vadWorkerRef.current) {
+      return Promise.reject(new Error('VAD worker not ready'))
+    }
+
     setProcessing(true)
     fileDurationRef.current = samples.length / 16000
 
@@ -429,7 +443,7 @@ export function useSttWorkerPipeline() {
       const msg: VadWorkerRequest = { type: 'process-file', samples }
       vadWorkerRef.current!.postMessage(msg, [samples.buffer as ArrayBuffer])
     })
-  }, [ready, resetState])
+  }, [ready, resetState, transcribeSegment])
 
   return {
     ready,
