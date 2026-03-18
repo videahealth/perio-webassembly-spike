@@ -264,7 +264,6 @@ export function useSttWorkerPipeline() {
     for (let i = 0; i < poolSize; i++) {
       const sttWorker = new Worker(
         new URL('./stt.worker.ts', import.meta.url),
-        { type: 'module' },
       )
 
       sttWorker.onmessage = (event: MessageEvent<TranscriptionWorkerResponse>) => {

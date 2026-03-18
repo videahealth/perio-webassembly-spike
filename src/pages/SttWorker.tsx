@@ -143,8 +143,8 @@ export default function SttWorker() {
     resetState,
   } = useSttPipeline()
 
-  const [selectedModel, setSelectedModel] = useState(VOSK_MODELS[0].url)
-  const [poolSize, setPoolSize] = useState(4)
+  const [selectedModel, setSelectedModel] = useState(VOSK_MODELS[1].url)
+  const [poolSize, setPoolSize] = useState(2)
   const [displayEntries, setDisplayEntries] = useState<DisplayEntry[]>([])
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [fileSamples, setFileSamples] = useState<Float32Array | null>(null)

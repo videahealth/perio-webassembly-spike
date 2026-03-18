@@ -1,5 +1,38 @@
-import { createModel, type Model, type KaldiRecognizer } from 'vosk-browser'
-import type { TranscriptionWorkerRequest, TranscriptionWorkerResponse } from './stt.worker.types'
+/// <reference lib="webworker" />
+
+// vosk-wasm.js is served from public/ — defines global `loadVoskWasm`
+importScripts('/vosk-wasm.js')
+
+interface VoskModel {
+  findWord(word: string): number;
+  delete(): void;
+}
+
+interface VoskRecognizer {
+  acceptWaveform(audioData: Float32Array): string;
+  finalResult(): string;
+  reset(): void;
+  setWords(words: boolean): void;
+  delete(): void;
+}
+
+interface VoskWasm {
+  createModel(tarBuffer: ArrayBuffer): VoskModel;
+  createRecognizer(model: VoskModel, sampleRate: number, grammar: string): VoskRecognizer;
+}
+
+declare function loadVoskWasm(moduleArg?: Record<string, unknown>): Promise<VoskWasm>
+
+type TranscriptionWorkerRequest =
+  | { type: 'init'; modelUrl: string }
+  | { type: 'transcribe'; chunkId: number; audio: Float32Array<ArrayBuffer>; startTime: number; duration: number }
+
+type TranscriptionWorkerResponse =
+  | { type: 'init-progress'; message: string }
+  | { type: 'init-done' }
+  | { type: 'init-error'; error: string }
+  | { type: 'ready' }
+  | { type: 'result'; chunkId: number; text: string; latencyMs: number }
 
 // Same grammar as videa-desktop python-stt VoskSTT.PERIO_GRAMMAR
 const PERIO_GRAMMAR = JSON.stringify([
@@ -35,14 +68,8 @@ const PERIO_GRAMMAR = JSON.stringify([
   "[unk]",
 ])
 
-let model: Model | null = null
-// Pre-create next recognizer while current one is processing
-let nextRecognizer: KaldiRecognizer | null = null
-
-function createRecognizer(): KaldiRecognizer | null {
-  if (!model) return null
-  return new model.KaldiRecognizer(16000, PERIO_GRAMMAR)
-}
+let vosk: VoskWasm | null = null
+let recognizer: VoskRecognizer | null = null
 
 function fmtTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -59,9 +86,17 @@ self.onmessage = async (event: MessageEvent<TranscriptionWorkerRequest>) => {
 
   if (msg.type === 'init') {
     try {
-      post({ type: 'init-progress', message: `Loading Vosk model: ${msg.modelUrl}` })
-      model = await createModel(msg.modelUrl)
-      nextRecognizer = createRecognizer()
+      post({ type: 'init-progress', message: 'Loading vosk-wasm module...' })
+      vosk = await loadVoskWasm()
+
+      post({ type: 'init-progress', message: `Downloading model: ${msg.modelUrl}` })
+      const response = await fetch(msg.modelUrl)
+      if (!response.ok || !response.body) throw new Error(`Failed to fetch model: ${response.status}`)
+      // Server sends Content-Encoding: gzip, so the browser already decompresses.
+      const tarBuffer = await response.arrayBuffer()
+      post({ type: 'init-progress', message: 'Loading model into Vosk...' })
+      const model = vosk.createModel(tarBuffer)
+      recognizer = vosk.createRecognizer(model, 16000, PERIO_GRAMMAR)
       post({ type: 'init-progress', message: 'Vosk model loaded' })
       post({ type: 'init-done' })
       post({ type: 'ready' })
@@ -72,31 +107,23 @@ self.onmessage = async (event: MessageEvent<TranscriptionWorkerRequest>) => {
   }
 
   if (msg.type === 'transcribe') {
-    if (!model) return
+    if (!recognizer) return
     const { chunkId, audio, startTime, duration } = msg
     const label = `STT ${fmtTime(startTime)}–${fmtTime(startTime + duration)}`
     const markStart = `${label}-start`
     performance.mark(markStart)
     const submitTime = Date.now()
 
-    // Use pre-created recognizer, or create one if not available
-    const recognizer = nextRecognizer ?? createRecognizer()
-    if (!recognizer) return
+    // Feed audio and get final result synchronously
+    recognizer.acceptWaveform(audio)
+    const resultJson = recognizer.finalResult()
+    const text = JSON.parse(resultJson).text?.trim() || ''
 
-    // Pre-create the next recognizer while this one processes
-    nextRecognizer = createRecognizer()
+    performance.measure(label, markStart)
+    post({ type: 'result', chunkId, text, latencyMs: Date.now() - submitTime })
 
-    recognizer.on('result', (message) => {
-      if (message.event !== 'result') return
-      const text = message.result.text?.trim() || ''
-      performance.measure(label, markStart)
-      post({ type: 'result', chunkId, text, latencyMs: Date.now() - submitTime })
-      recognizer.remove()
-      post({ type: 'ready' })
-    })
-
-    recognizer.acceptWaveformFloat(audio, 16000)
-    recognizer.retrieveFinalResult()
+    recognizer.reset()
+    post({ type: 'ready' })
     return
   }
 }
