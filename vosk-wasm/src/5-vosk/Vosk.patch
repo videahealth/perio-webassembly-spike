@@ -1,0 +1,126 @@
+diff --git a/src/model.cc b/src/model.cc
+index 035ffee..18edcd3 100644
+--- a/src/model.cc
++++ b/src/model.cc
+@@ -23,7 +23,7 @@
+ #include <fst/register.h>
+ #include <fst/matcher-fst.h>
+ #include <fst/extensions/ngram/ngram-fst.h>
+-
++#include <emscripten/console.h>
+ 
+ #ifdef HAVE_MKL
+ // We need to set num threads
+@@ -74,38 +74,37 @@ static void KaldiLogHandler(const LogMessageEnvelope &env, const char *message)
+ #else
+ static void KaldiLogHandler(const LogMessageEnvelope &env, const char *message)
+ {
+-  if (env.severity > GetVerboseLevel())
+-      return;
++    if (env.severity > GetVerboseLevel())
++        return;
+ 
+-  // Modified default Kaldi logging so we can disable LOG messages.
+-  std::stringstream full_message;
+-  if (env.severity > LogMessageEnvelope::kInfo) {
+-    full_message << "VLOG[" << env.severity << "] (";
+-  } else {
+-    switch (env.severity) {
+-    case LogMessageEnvelope::kInfo:
+-      full_message << "LOG (";
+-      break;
+-    case LogMessageEnvelope::kWarning:
+-      full_message << "WARNING (";
+-      break;
+-    case LogMessageEnvelope::kAssertFailed:
+-      full_message << "ASSERTION_FAILED (";
+-      break;
+-    case LogMessageEnvelope::kError:
+-    default: // If not the ERROR, it still an error!
+-      full_message << "ERROR (";
+-      break;
++    // Modified default Kaldi logging so we can disable LOG messages.
++    std::stringstream full_message;
++    if (env.severity > LogMessageEnvelope::kInfo) {
++        full_message << "VLOG[" << env.severity << "] (";
++    } else {
++        switch (env.severity) {
++        case LogMessageEnvelope::kInfo:
++        full_message << "LOG (";
++        break;
++        case LogMessageEnvelope::kWarning:
++        full_message << "WARNING (";
++        break;
++        case LogMessageEnvelope::kAssertFailed:
++        full_message << "ASSERTION_FAILED (";
++        break;
++        case LogMessageEnvelope::kError:
++        default: // If not the ERROR, it still an error!
++        full_message << "ERROR (";
++        break;
++        }
+     }
+-  }
+-  // Add other info from the envelope and the message text.
+-  full_message << "VoskAPI" << ':'
+-               << env.func << "():" << env.file << ':'
+-               << env.line << ") " << message;
+-
+-  // Print the complete message to stderr.
+-  full_message << "\n";
+-  std::cerr << full_message.str();
++    // Add other info from the envelope and the message text.
++    full_message << "VoskAPI" << ':'
++                << env.func << "():" << env.file << ':'
++                << env.line << ") " << message;
++    if(env.severity >= LogMessageEnvelope::kInfo) emscripten_console_log(full_message.str().c_str());
++    else if(env.severity == LogMessageEnvelope::kWarning) emscripten_console_warn(full_message.str().c_str());
++    else emscripten_console_error(full_message.str().c_str());
+ }
+ #endif
+ 
+diff --git a/src/recognizer.cc b/src/recognizer.cc
+index 55d9991..44ac113 100644
+--- a/src/recognizer.cc
++++ b/src/recognizer.cc
+@@ -17,6 +17,7 @@
+ #include "fstext/fstext-utils.h"
+ #include "lat/sausages.h"
+ #include "language_model.h"
++#include "wasm_simd128.h"
+ 
+ using namespace fst;
+ using namespace kaldi::nnet3;
+@@ -379,13 +380,20 @@ bool Recognizer::AcceptWaveform(const short *sdata, int len)
+         wave(i) = sdata[i];
+     return AcceptWaveform(wave);
+ }
+-
++const v128_t _32768fx4{wasm_f32x4_const_splat(32768.0f)};
+ bool Recognizer::AcceptWaveform(const float *fdata, int len)
+ {
+     Vector<BaseFloat> wave;
+     wave.Resize(len, kUndefined);
+-    for (int i = 0; i < len; i++)
+-        wave(i) = fdata[i];
++    float* dst{wave.Data()};
++    int x4Len{len >> 2 << 2};
++    int i{};
++    for(;i < x4Len; i += 4) {
++        wasm_v128_store(dst + i, wasm_f32x4_mul(wasm_v128_load(fdata + i), _32768fx4));
++    }
++    for(i = x4Len; i < len; ++i) {
++        dst[i] = fdata[i] * 32768.0f;
++    }
+     return AcceptWaveform(wave);
+ }
+ 
+@@ -844,7 +852,7 @@ const char* Recognizer::PartialResult()
+ 
+         clat = decoder_->GetLattice(decoder_->NumFramesInLattice(), false);
+         if (model_->winfo_) {
+-            WordAlignLatticePartial(clat, *model_->trans_model_, *model_->winfo_, 0, &aligned_lat);
++            WordAlignLattice(clat, *model_->trans_model_, *model_->winfo_, 0, &aligned_lat);
+         } else {
+             CopyLatticeForMbr(clat, &aligned_lat);
+         }
