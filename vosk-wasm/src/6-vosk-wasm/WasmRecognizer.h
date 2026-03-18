@@ -7,7 +7,7 @@ struct WasmRecognizer {
 
   WasmRecognizer(float sampleRate, WasmModel *model, const std::string &grammar);
   ~WasmRecognizer();
-  std::string acceptWaveform(int start, int len);
+  bool acceptWaveform(int start, int len);
   std::string finalResult();
   void reset();
   void setWords(bool words);

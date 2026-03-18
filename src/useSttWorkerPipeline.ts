@@ -51,7 +51,7 @@ export function useSttWorkerPipeline() {
   const chunkWorkerMapRef = useRef<Map<number, number>>(new Map())
   const audioContextRef = useRef<AudioContext | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
-  const processorRef = useRef<ScriptProcessorNode | null>(null)
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null)
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
 
   const [ready, setReady] = useState(false)
@@ -73,6 +73,7 @@ export function useSttWorkerPipeline() {
   const fileDurationRef = useRef(0)
   const lastSegmentEndRef = useRef(0)
   const recordSampleRateRef = useRef(16000)
+  const recordedChunksRef = useRef<Float32Array[]>([])
   const nextIdRef = useRef(0)
 
   // Track init state
@@ -359,32 +360,43 @@ export function useSttWorkerPipeline() {
     if (!vadWorkerRef.current || !ready) return
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 16000,
+        },
+      })
       mediaStreamRef.current = stream
 
       const audioCtx = new AudioContext({ sampleRate: 16000 })
       audioContextRef.current = audioCtx
       recordSampleRateRef.current = audioCtx.sampleRate
 
+      await audioCtx.audioWorklet.addModule('/pcm-capture-processor.js')
+
       const source = audioCtx.createMediaStreamSource(stream)
       sourceRef.current = source
 
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1)
-      processorRef.current = processor
+      const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor')
+      workletNodeRef.current = workletNode
 
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0)
-        const rawSamples = new Float32Array(inputData)
+      workletNode.port.onmessage = (e: MessageEvent<{ samples: Float32Array }>) => {
+        const rawSamples = e.data.samples
         const samples = recordSampleRateRef.current !== 16000
           ? downsample(rawSamples, recordSampleRateRef.current, 16000)
           : rawSamples
+        recordedChunksRef.current.push(new Float32Array(samples))
         const msg: VadWorkerRequest = { type: 'audio', samples }
         vadWorkerRef.current?.postMessage(msg, [samples.buffer as ArrayBuffer])
       }
 
-      source.connect(processor)
-      processor.connect(audioCtx.destination)
+      source.connect(workletNode)
+      workletNode.connect(audioCtx.destination)
 
+      recordedChunksRef.current = []
       setListening(true)
       resetState()
     } catch (e) {
@@ -392,11 +404,11 @@ export function useSttWorkerPipeline() {
     }
   }, [ready, resetState])
 
-  const stop = useCallback(() => {
+  const stop = useCallback((): Float32Array<ArrayBuffer> | null => {
     vadWorkerRef.current?.postMessage({ type: 'stop' } satisfies VadWorkerRequest)
 
-    if (processorRef.current && sourceRef.current) {
-      processorRef.current.disconnect()
+    if (workletNodeRef.current && sourceRef.current) {
+      workletNodeRef.current.disconnect()
       sourceRef.current.disconnect()
     }
     if (audioContextRef.current) {
@@ -408,10 +420,23 @@ export function useSttWorkerPipeline() {
       mediaStreamRef.current = null
     }
 
-    processorRef.current = null
+    workletNodeRef.current = null
     sourceRef.current = null
     setListening(false)
     setSpeaking(false)
+
+    // Return accumulated recording
+    const chunks = recordedChunksRef.current
+    recordedChunksRef.current = []
+    if (chunks.length === 0) return null
+    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0)
+    const result = new Float32Array(totalLength) as Float32Array<ArrayBuffer>
+    let offset = 0
+    for (const chunk of chunks) {
+      result.set(chunk, offset)
+      offset += chunk.length
+    }
+    return result
   }, [])
 
   const processFile = useCallback((samples: Float32Array<ArrayBuffer>, skipVad?: boolean): Promise<void> => {

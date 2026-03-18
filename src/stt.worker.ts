@@ -9,7 +9,7 @@ interface VoskModel {
 }
 
 interface VoskRecognizer {
-  acceptWaveform(audioData: Float32Array): string;
+  acceptWaveform(audioData: Float32Array): boolean;
   finalResult(): string;
   reset(): void;
   setWords(words: boolean): void;
@@ -114,10 +114,13 @@ self.onmessage = async (event: MessageEvent<TranscriptionWorkerRequest>) => {
     performance.mark(markStart)
     const submitTime = Date.now()
 
-    // Feed audio and get final result synchronously
-    recognizer.acceptWaveform(audio)
+    // Feed audio, then finalize to get the result
+    const acceptResult = recognizer.acceptWaveform(audio)
+    console.log(`[stt] chunkId=${chunkId} audioLen=${audio.length} acceptWaveform returned:`, acceptResult)
     const resultJson = recognizer.finalResult()
+    console.log(`[stt] chunkId=${chunkId} finalResult:`, resultJson)
     const text = JSON.parse(resultJson).text?.trim() || ''
+    console.log(`[stt] chunkId=${chunkId} text: "${text}"`)
 
     performance.measure(label, markStart)
     post({ type: 'result', chunkId, text, latencyMs: Date.now() - submitTime })

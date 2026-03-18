@@ -13,7 +13,7 @@ docker build -t vosk-wasm-builder .
 echo "=== Extracting build artifacts ==="
 CONTAINER_ID=$(docker create vosk-wasm-builder)
 docker cp "$CONTAINER_ID:/build/output/vosk-wasm.js" "$PUBLIC_DIR/vosk-wasm.js"
-docker cp "$CONTAINER_ID:/build/output/vosk-wasm.wasm" "$PUBLIC_DIR/vosk-wasm.wasm"
+docker cp "$CONTAINER_ID:/build/output/vosk-wasm.wasm" "$PUBLIC_DIR/src/vosk-wasm.wasm"
 docker rm "$CONTAINER_ID" > /dev/null
 
 echo "=== Done! ==="

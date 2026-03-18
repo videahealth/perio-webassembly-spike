@@ -32,5 +32,7 @@ RUN bash /build/src/4-kaldi/build.sh
 COPY src/5-vosk/ /build/src/5-vosk/
 RUN bash /build/src/5-vosk/build.sh
 
+# force Docker to never cache this step
+ARG CACHEBUST=1 
 COPY src/6-vosk-wasm/ /build/src/6-vosk-wasm/
 RUN bash /build/src/6-vosk-wasm/build.sh

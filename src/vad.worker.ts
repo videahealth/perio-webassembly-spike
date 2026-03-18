@@ -228,7 +228,8 @@ self.onmessage = (event: MessageEvent<VadWorkerRequest>) => {
     resetAudioTimestamps();
 
     const allSamples = msg.samples;
-    const chunkSize = 4096;
+    // Match videa-desktop AudioWorklet: 128-sample chunks
+    const chunkSize = 128;
     // Process in small batches, yielding between each so vad-segment messages
     // reach the main thread and transcription can start in parallel.
     const batchSize = 16; // ~65k samples (~4s at 16kHz) per batch

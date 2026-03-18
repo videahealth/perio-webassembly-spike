@@ -156,6 +156,7 @@ export default function SttWorker() {
   const pyodideRef = useRef<PyodideInterface | null>(null)
   const processTranscriptAllRef = useRef<((text: string) => unknown) | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const resultsRef = useRef<HTMLDivElement | null>(null)
   const [currentTime, setCurrentTime] = useState<number>(-1)
   const [now, setNow] = useState(() => performance.now())
 
@@ -333,6 +334,12 @@ export default function SttWorker() {
   const canProcess = ready && fileSamples && !processing && !simulating && !listening
   const isBusy = processing || simulating || listening
 
+  // Auto-scroll transcription results to bottom on new entries
+  useEffect(() => {
+    const el = resultsRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [renderedEntries.length])
+
   return (
     <div>
       <h1>STT Worker</h1>
@@ -390,11 +397,25 @@ export default function SttWorker() {
         <span style={{ color: '#888', fontSize: '0.85rem', fontWeight: 'bold', alignSelf: 'end', marginBottom: '8px' }}>Recording</span>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
           {!listening ? (
-            <button onClick={start} disabled={!ready || processing || simulating} style={btnSecondary}>
+            <button onClick={() => {
+              if (audioUrl) URL.revokeObjectURL(audioUrl)
+              setAudioUrl(null)
+              setFileSamples(null)
+              setDisplayEntries([])
+              start()
+            }} disabled={!ready || processing || simulating} style={btnSecondary}>
               Start Listening
             </button>
           ) : (
-            <button onClick={stop} style={btnSecondary}>Stop</button>
+            <button onClick={() => {
+              const recorded = stop()
+              if (recorded && recorded.length > 0) {
+                setFileSamples(recorded)
+                const blob = float32ToWavBlob(recorded)
+                if (audioUrl) URL.revokeObjectURL(audioUrl)
+                setAudioUrl(URL.createObjectURL(blob))
+              }
+            }} style={btnSecondary}>Stop</button>
           )}
 
           <button
@@ -462,7 +483,12 @@ export default function SttWorker() {
 
       {/* WAV player */}
       {audioUrl && (
-        <audio ref={audioRef} controls src={audioUrl} style={{ width: '100%', marginTop: '1rem' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1rem' }}>
+          <audio ref={audioRef} controls src={audioUrl} style={{ flex: 1 }} />
+          <a href={audioUrl} download="recording.wav" style={btnSecondary} title="Download WAV">
+            &#11015; WAV
+          </a>
+        </div>
       )}
 
       {/* Worker status boxes: VAD → Queue → STT */}
@@ -484,12 +510,12 @@ export default function SttWorker() {
       {renderedEntries.length > 0 && (
         <section style={{ marginTop: '1.5rem', textAlign: 'left' }}>
           <h2 style={{ textAlign: 'left' }}>Transcription Results</h2>
-          <div style={{
+          <div ref={resultsRef} style={{
             fontFamily: 'monospace', fontSize: '0.85rem',
             background: '#1a1a1a', borderRadius: '8px',
             maxHeight: '500px', overflow: 'auto', textAlign: 'left',
             paddingTop: '1rem', paddingBottom: '1rem',
-            display: 'grid', gridTemplateColumns: 'min-content min-content min-content min-content min-content max-content 1fr',
+            display: 'grid', gridTemplateColumns: 'min-content min-content min-content min-content min-content 1fr 1fr',
             border: '1px solid #444'
           }}>
             <div style={{ display: 'contents', fontWeight: 'bold', color: '#aaa' }} className='chunk-row'>

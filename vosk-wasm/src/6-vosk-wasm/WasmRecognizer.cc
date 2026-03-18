@@ -8,13 +8,10 @@ WasmRecognizer::WasmRecognizer(float sampleRate, WasmModel *model, const std::st
     emscripten_console_error("Unable to initialize recognizer");
 }
 
-std::string WasmRecognizer::acceptWaveform(int start, int len)
+bool WasmRecognizer::acceptWaveform(int start, int len)
 {
   float *fdata = reinterpret_cast<float *>(start);
-  if (vosk_recognizer_accept_waveform_f(rec, fdata, len))
-    return vosk_recognizer_result(rec);
-  else
-    return vosk_recognizer_partial_result(rec);
+  return vosk_recognizer_accept_waveform_f(rec, fdata, len) != 0;
 }
 
 std::string WasmRecognizer::finalResult()
