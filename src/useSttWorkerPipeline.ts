@@ -394,7 +394,6 @@ export function useSttWorkerPipeline() {
       }
 
       source.connect(workletNode)
-      workletNode.connect(audioCtx.destination)
 
       recordedChunksRef.current = []
       setListening(true)

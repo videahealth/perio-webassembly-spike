@@ -44,5 +44,7 @@ bash vosk-wasm/make.sh
     * this sample is small enough to be a single VAD flush
 
 * need to create some kind of unified testing file for side by side differences 
-
+* ideally we can test each layer independently (not separate tests, just separate snapshot outputs per-test) so it's easy to see where degradations occur (VAD changes, Transcript changes, Normalizer changes) since each thing has a big downstream impact
+* TODO: test existing python layer 
+* TODO: make it possible to test this local spike repo via workers in node instead of the browser (should be easy, I think? Node supports WASM)
 
