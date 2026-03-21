@@ -1,10 +1,10 @@
-export type VadWorkerRequest =
+type VadWorkerRequest =
   | { type: 'init' }
   | { type: 'audio'; samples: Float32Array<ArrayBufferLike> }
   | { type: 'stop' }
   | { type: 'process-file'; samples: Float32Array<ArrayBufferLike> }
 
-export type VadWorkerResponse =
+type VadWorkerResponse =
   | { type: 'init-progress'; message: string }
   | { type: 'init-done' }
   | { type: 'init-error'; error: string }

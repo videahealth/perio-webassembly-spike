@@ -1,0 +1,93 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`vad.worker > process-file produces deterministic VAD segments for Recording-30s.wav 1`] = `
+[
+  {
+    "speaking": true,
+    "type": "vad-status",
+  },
+  {
+    "speaking": false,
+    "type": "vad-status",
+  },
+  {
+    "audioLength": 44352,
+    "duration": 2.772,
+    "startTime": 0,
+    "type": "vad-segment",
+  },
+  {
+    "speaking": true,
+    "type": "vad-status",
+  },
+  {
+    "speaking": false,
+    "type": "vad-status",
+  },
+  {
+    "audioLength": 102368,
+    "duration": 6.398,
+    "startTime": 5.342,
+    "type": "vad-segment",
+  },
+  {
+    "speaking": true,
+    "type": "vad-status",
+  },
+  {
+    "speaking": false,
+    "type": "vad-status",
+  },
+  {
+    "audioLength": 37728,
+    "duration": 2.358,
+    "startTime": 11.934,
+    "type": "vad-segment",
+  },
+  {
+    "speaking": true,
+    "type": "vad-status",
+  },
+  {
+    "speaking": false,
+    "type": "vad-status",
+  },
+  {
+    "audioLength": 28352,
+    "duration": 1.772,
+    "startTime": 14.6,
+    "type": "vad-segment",
+  },
+  {
+    "speaking": true,
+    "type": "vad-status",
+  },
+  {
+    "speaking": false,
+    "type": "vad-status",
+  },
+  {
+    "audioLength": 30912,
+    "duration": 1.932,
+    "startTime": 16.68,
+    "type": "vad-segment",
+  },
+  {
+    "speaking": true,
+    "type": "vad-status",
+  },
+  {
+    "speaking": false,
+    "type": "vad-status",
+  },
+  {
+    "audioLength": 41184,
+    "duration": 2.574,
+    "startTime": 18.918,
+    "type": "vad-segment",
+  },
+  {
+    "type": "file-done",
+  },
+]
+`;

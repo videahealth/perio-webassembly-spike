@@ -1,23 +1,15 @@
 /**
  * Web Worker that runs sherpa-onnx WASM for VAD only.
  * Speech segments are sent back to the main thread for ASR via vosk-browser.
- */
+*/
+
+/// <reference path="./vad.worker.types.d.ts" />
 
 /* eslint-disable no-var, @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
 declare function importScripts(...urls: string[]): void;
 declare var process: { versions?: { node?: string } } | undefined;
 declare var __dirname: string;
 declare var require: (id: string) => any;
-
-// Bootstrap require for Node ESM (tsx loads workers as ESM where require is absent)
-if (typeof process === 'object' && typeof process.versions?.node === 'string' && typeof require === 'undefined') {
-  // @ts-expect-error Node built-in modules not typed in worker context
-  const { createRequire } = await import('module');
-  // @ts-expect-error Node built-in modules not typed in worker context
-  const { fileURLToPath } = await import('url');
-  (globalThis as any).require = createRequire(fileURLToPath(import.meta.url));
-  (globalThis as any).__dirname = fileURLToPath(new URL('.', import.meta.url));
-}
 
 interface EmscriptenModule {
   onRuntimeInitialized: () => void;
@@ -61,22 +53,6 @@ declare class CircularBuffer {
 
 declare function createVad(Module: EmscriptenModule, config?: Record<string, unknown>): Vad;
 
-// Message types (duplicated here since classic workers can't use import/export)
-type VadWorkerRequest =
-  | { type: 'init' }
-  | { type: 'audio'; samples: Float32Array<ArrayBufferLike> }
-  | { type: 'stop' }
-  | { type: 'process-file'; samples: Float32Array<ArrayBufferLike> }
-
-type VadWorkerResponse =
-  | { type: 'init-progress'; message: string }
-  | { type: 'init-done' }
-  | { type: 'init-error'; error: string }
-  | { type: 'vad-status'; speaking: boolean }
-  | { type: 'vad-segment'; audio: Float32Array<ArrayBuffer>; startTime: number; duration: number; audioReceivedAt: number; vadEmittedAt: number }
-  | { type: 'file-done' }
-  | { type: 'error'; error: string }
-
 declare var Module: EmscriptenModule;
 
 let vad: Vad | null = null;
@@ -84,40 +60,38 @@ let buffer: CircularBuffer | null = null;
 let printed = false;
 const SAMPLE_RATE = 16000;
 
-// Match videa-desktop speech_pad_ms=200: prepend pre-speech audio to VAD
-// segments so word onsets detected slightly late are not clipped.
-const SPEECH_PAD_SAMPLES = Math.floor(SAMPLE_RATE * 200 / 1000); // 3200
+// Accumulates incoming audio. When VAD emits a segment, it may be late to
+// activate. This lets us keep a buffer of audio from before VAD detected speech.
+let preVadBuffer = new Float32Array(0);
+let preVadBufferIdx = 0; // preVadBuffer is a sliding window over all audio - track its relative position
 
-// Accumulates all incoming audio. On segment emit we look back from
-// segment.start to grab padding, then discard everything before segment.start.
-let trailingAudio = new Float32Array(0);
-let trailingAudioOffset = 0; // absolute sample index of trailingAudio[0]
-
-function pushTrailingAudio(samples: Float32Array) {
-  const next = new Float32Array(trailingAudio.length + samples.length);
-  next.set(trailingAudio);
-  next.set(samples, trailingAudio.length);
-  trailingAudio = next;
+function bufferPreVadAudio(samples: Float32Array) {
+  const next = new Float32Array(preVadBuffer.length + samples.length);
+  next.set(preVadBuffer);
+  next.set(samples, preVadBuffer.length);
+  preVadBuffer = next;
 }
 
-/** Returns up to SPEECH_PAD_SAMPLES of audio before segmentStart, then discards everything up to segmentStart. */
-function consumeTrailingAudio(segmentStart: number): Float32Array {
-  const padStart = Math.max(trailingAudioOffset, segmentStart - SPEECH_PAD_SAMPLES);
-  const padEnd = segmentStart;
-  const padding = padEnd > padStart
-    ? trailingAudio.slice(padStart - trailingAudioOffset, padEnd - trailingAudioOffset)
-    : new Float32Array(0);
-  const cut = segmentStart - trailingAudioOffset;
-  if (cut > 0) {
-    trailingAudio = trailingAudio.slice(cut);
-    trailingAudioOffset = segmentStart;
-  }
-  return padding;
+/** Prepends up to SPEECH_PAD_SAMPLES of pre-VAD audio to the VAD segment, then clears the buffer. */
+const SPEECH_PAD_SAMPLES = SAMPLE_RATE; // 1 second (16000 samples)
+function prependPreVadAudio(vadSegment: { samples: Float32Array; start: number }): { audio: Float32Array<ArrayBuffer>; start: number } {
+  const relativeVadStart = Math.max(0, Math.min(vadSegment.start - preVadBufferIdx, preVadBuffer.length))
+  const uniqueAudio = preVadBuffer.subarray(0, relativeVadStart);
+  const prefixAudio = uniqueAudio.subarray(Math.max(0, uniqueAudio.length - SPEECH_PAD_SAMPLES));
+
+  const audio = new Float32Array(prefixAudio.length + vadSegment.samples.length);
+  audio.set(prefixAudio, 0);
+  audio.set(vadSegment.samples, prefixAudio.length);
+
+  preVadBufferIdx += preVadBuffer.length;
+  preVadBuffer = new Float32Array(0);
+
+  return { audio, start: Math.max(0, vadSegment.start - prefixAudio.length) };
 }
 
-function resetTrailingAudio() {
-  trailingAudio = new Float32Array(0);
-  trailingAudioOffset = 0;
+function resetPreVadAudio() {
+  preVadBuffer = new Float32Array(0);
+  preVadBufferIdx = 0;
 }
 
 // Track when audio samples were received, keyed by cumulative sample offset
@@ -161,15 +135,10 @@ function fmtTime(seconds: number): string {
 }
 
 function createVadSegment(segment: { samples: Float32Array; start: number }) {
-  const padding = consumeTrailingAudio(segment.start);
-  const audio = new Float32Array(padding.length + segment.samples.length);
-  audio.set(padding, 0);
-  audio.set(segment.samples, padding.length);
-  
-  const paddedStart = Math.max(0, segment.start - padding.length);
+  const { audio, start } = prependPreVadAudio(segment);
   const duration = audio.length / SAMPLE_RATE;
-  const startTime = paddedStart / SAMPLE_RATE;
-  const received = lookupAudioReceivedAt(paddedStart);
+  const startTime = start / SAMPLE_RATE;
+  const received = lookupAudioReceivedAt(start);
   const vadEmittedAt = Date.now();
 
   const label = `VAD ${fmtTime(startTime)}–${fmtTime(startTime + duration)}`;
@@ -298,7 +267,7 @@ function handleMessage(msg: VadWorkerRequest) {
   if (msg.type === 'audio') {
     if (!vad || !buffer) return;
     recordAudioArrival(msg.samples.length);
-    pushTrailingAudio(msg.samples);
+    bufferPreVadAudio(msg.samples);
     buffer.push(msg.samples);
     processBuffer();
     return;
@@ -314,7 +283,7 @@ function handleMessage(msg: VadWorkerRequest) {
     buffer.reset();
     printed = false;
     resetAudioTimestamps();
-    resetTrailingAudio();
+    resetPreVadAudio();
 
     const allSamples = msg.samples;
     // Match videa-desktop AudioWorklet: 128-sample chunks
@@ -331,7 +300,7 @@ function handleMessage(msg: VadWorkerRequest) {
         const end = Math.min(offset + chunkSize, allSamples.length);
         recordAudioArrival(end - offset);
         const chunk = new Float32Array(allSamples.buffer, allSamples.byteOffset + offset * 4, end - offset);
-        pushTrailingAudio(chunk);
+        bufferPreVadAudio(chunk);
         buffer.push(chunk);
         processBuffer();
         offset = end;
@@ -361,7 +330,7 @@ function handleMessage(msg: VadWorkerRequest) {
     if (buffer) buffer.reset();
     printed = false;
     resetAudioTimestamps();
-    resetTrailingAudio();
+    resetPreVadAudio();
     return;
   }
 }

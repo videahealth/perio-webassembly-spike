@@ -1,5 +1,5 @@
+/// <reference path="./vad.worker.types.d.ts" />
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { VadWorkerRequest, VadWorkerResponse } from './vad.worker.types'
 import type { TranscriptionWorkerRequest, TranscriptionWorkerResponse } from './stt.worker.types'
 
 export type ChunkEntry = {
